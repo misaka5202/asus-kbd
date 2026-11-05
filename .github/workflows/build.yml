@@ -1,0 +1,68 @@
+name: Build asus-kbd
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build asus-kbd
+        run: |
+          set -euo pipefail
+          # Pure Swift + IOKit.hid, no Xcode project needed.
+          swiftc -O \
+            -framework IOKit \
+            -framework CoreFoundation \
+            -o asus-kbd \
+            AsusKbdHID.swift FnKeyMonitor.swift main.swift 2>&1 | tee build.log
+
+      - name: Verify binary
+        run: |
+          set -euo pipefail
+          test -f asus-kbd || { echo "binary not produced"; exit 1; }
+          file asus-kbd
+          lipo -info asus-kbd
+          # The protocol constants must be in the binary, otherwise the
+          # compiler folded something away.
+          for sym in AsusKbdHID FnKeyMonitor setBacklight illumination; do
+            strings asus-kbd | grep -qi "$sym" \
+              || { echo "MISSING: $sym"; exit 1; }
+          done
+          echo "verification OK"
+
+      - name: Package
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          [ -f asus-kbd ] && cp asus-kbd artifacts/ || true
+          ls -l artifacts
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asus-kbd
+          path: artifacts/*
+          if-no-files-found: warn
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
