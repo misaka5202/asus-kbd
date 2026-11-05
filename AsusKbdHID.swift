@@ -121,10 +121,11 @@ final class AsusKbdHID {
     private static func firstDevice(_ mgr: IOHIDManager) -> IOHIDDevice? {
         guard let set = IOHIDManagerCopyDevices(mgr) else { return nil }
 
-        // Bridge the untyped CFSet through NSArray, which is well defined for
-        // IOHIDDevice elements and avoids hand-rolled CFSet pointer juggling.
-        let array = set as NSArray
-        for case let obj as IOHIDDevice in array {
+        // IOHIDManagerCopyDevices hands back an untyped CFSet. Bridge through
+        // NSSet, which CFSet is toll-free with, and then look for an
+        // IOHIDDevice among the members.
+        let nsSet = set as NSSet
+        for case let obj as IOHIDDevice in nsSet {
             return obj
         }
         return nil
