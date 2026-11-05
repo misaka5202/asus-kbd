@@ -23,7 +23,11 @@ jobs:
         run: |
           set -euo pipefail
           # Pure Swift + IOKit.hid, no Xcode project needed.
+          # The runner is arm64, but this binary is for an x86_64 Hackintosh,
+          # so cross-compile explicitly. Without -target the output is a
+          # arm64 Mach-O (cputype 0x0100000C) and will not run there.
           swiftc -O \
+            -target x86_64-apple-macos11.0 \
             -framework IOKit \
             -framework CoreFoundation \
             -o asus-kbd \
@@ -35,6 +39,13 @@ jobs:
           test -f asus-kbd || { echo "binary not produced"; exit 1; }
           file asus-kbd
           lipo -info asus-kbd
+          # Must be x86_64: the target machine is an x86_64 Hackintosh and
+          # an arm64 Mach-O would simply not execute there.
+          lipo -info asus-kbd | grep -q x86_64 \
+            || { echo "binary is not x86_64"; exit 1; }
+          if lipo -info asus-kbd | grep -q arm64; then
+            echo "binary unexpectedly contains arm64"; exit 1
+          fi
           # The protocol constants must be in the binary, otherwise the
           # compiler folded something away.
           for sym in AsusKbdHID FnKeyMonitor setBacklight illumination; do
