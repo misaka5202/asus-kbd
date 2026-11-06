@@ -162,7 +162,38 @@ final class AsusKbdHID {
             ))
             index += 1
         }
-        return out
+
+        // IOHIDManagerCopyDevices hands back an unordered set, so the same
+        // machine can enumerate differently every run. Sort deterministically
+        // (vendor page first, then usage, then size) so the indices printed by
+        // `list` stay stable and safe to pass back in.
+        out.sort { a, b in
+            let aVendor = a.primaryUsagePage == asusVendorUsagePage
+            let bVendor = b.primaryUsagePage == asusVendorUsagePage
+            if aVendor != bVendor { return aVendor }
+            if a.primaryUsagePage != b.primaryUsagePage {
+                return a.primaryUsagePage < b.primaryUsagePage
+            }
+            if a.primaryUsage != b.primaryUsage { return a.primaryUsage < b.primaryUsage }
+            if a.maxFeatureReportSize != b.maxFeatureReportSize {
+                return a.maxFeatureReportSize < b.maxFeatureReportSize
+            }
+            return a.productID < b.productID
+        }
+
+        // Renumber after sorting so the printed index matches the array slot.
+        return out.enumerated().map { offset, c in
+            AsusHidCandidate(index: offset,
+                             device: c.device,
+                             product: c.product,
+                             vendorID: c.vendorID,
+                             productID: c.productID,
+                             primaryUsagePage: c.primaryUsagePage,
+                             primaryUsage: c.primaryUsage,
+                             transport: c.transport,
+                             maxFeatureReportSize: c.maxFeatureReportSize,
+                             maxInputReportSize: c.maxInputReportSize)
+        }
     }
 
     // MARK: - connection
@@ -206,34 +237,56 @@ final class AsusKbdHID {
 
     // MARK: - low level
 
+    /// Send a feature report.
+    ///
+    /// `exactLength` mirrors what Linux sends (see asus_kbd_set_brightness:
+    /// `const u8 buf[FEATURE_KBD_REPORT_SIZE] = {...}` i.e. 16 bytes). The
+    /// device advertises MaxFeatureReportSize 64 for the whole interface, but
+    /// the report we care about is smaller, so padding the payload up to 64
+    /// changes the request and the firmware may ignore it. We therefore try
+    /// the exact protocol length first and only fall back to the declared
+    /// feature size if the device rejects it.
     @discardableResult
-    private func setFeature(_ bytes: [UInt8]) throws -> Int {
+    private func setFeature(_ bytes: [UInt8], exactLength: Int? = nil) throws -> Int {
         guard let dev = device else { throw AsusKbdError.deviceNotFound }
 
-        // Pad up to the device's feature report size; the protocol fills the
-        // first 16 bytes and the tail must be zero.
         var buffer = bytes
-        if buffer.count < featureSize {
-            buffer.append(contentsOf: [UInt8](repeating: 0, count: featureSize - buffer.count))
+        let target = exactLength ?? buffer.count
+        if buffer.count < target {
+            buffer.append(contentsOf: [UInt8](repeating: 0, count: target - buffer.count))
+        } else if buffer.count > target {
+            buffer = Array(buffer.prefix(target))
         }
 
-        // Capture the length before taking the exclusive borrow: reading
-        // buffer.count inside withUnsafeMutableBytes is an overlapping access
-        // and Swift rejects it at compile time.
-        let length = buffer.count
-
-        let kr: IOReturn = buffer.withUnsafeMutableBytes { raw -> IOReturn in
-            let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
-            return IOHIDDeviceSetReport(dev,
-                                        kIOHIDReportTypeFeature,
-                                        Self.featureReportID,
-                                        base,
-                                        CFIndex(length))
+        func send(_ buf: [UInt8]) -> IOReturn {
+            let length = buf.count
+            return buf.withUnsafeBytes { raw -> IOReturn in
+                let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                return IOHIDDeviceSetReport(dev,
+                                            kIOHIDReportTypeFeature,
+                                            Self.featureReportID,
+                                            base,
+                                            CFIndex(length))
+            }
         }
+
+        var kr = send(buffer)
+        var used = buffer.count
+
+        if kr != kIOReturnSuccess, featureSize > buffer.count {
+            // Retry with the device's declared size before giving up.
+            var padded = buffer
+            padded.append(contentsOf: [UInt8](repeating: 0,
+                                              count: featureSize - buffer.count))
+            kr = send(padded)
+            used = padded.count
+        }
+
         if kr != kIOReturnSuccess {
-            throw AsusKbdError.setReportFailed(kr, length)
+            throw AsusKbdError.setReportFailed(kr, used)
         }
-        return buffer.count
+        return used
+
     }
 
     /// Read the feature report, trying the declared size and then progressively
@@ -276,7 +329,8 @@ final class AsusKbdHID {
                               0x2E, 0x49, 0x6E, 0x63, 0x2E]
         buf[0] = UInt8(Self.featureReportID)
         for (i, b) in ascii.enumerated() { buf[i + 1] = b }
-        try setFeature(buf)
+        // Linux: asus_kbd_init sends sizeof(buf) == 16.
+        try setFeature(buf, exactLength: Self.protocolReportSize)
     }
 
     /// Ask which features the keyboard implements.
@@ -288,7 +342,8 @@ final class AsusKbdHID {
         buf[3] = 0x31
         buf[5] = 0x08
 
-        try setFeature(buf)
+        // Linux: asus_kbd_get_functions sends sizeof(buf) == 6, not 16.
+        try setFeature(buf, exactLength: 6)
         let reply = try getFeature()
         guard reply.length > 6 else {
             // Too short to hold the capability byte; report unsupported rather
@@ -299,7 +354,8 @@ final class AsusKbdHID {
     }
 
     /// Set the keyboard backlight, 0..maxLevel.
-    func setBacklight(level: Int) throws {
+    @discardableResult
+    func setBacklight(level: Int) throws -> Int {
         let clamped = max(0, min(level, Self.maxLevel))
 
         var buf = [UInt8](repeating: 0, count: Self.protocolReportSize)
@@ -308,6 +364,7 @@ final class AsusKbdHID {
         buf[2] = 0xC5      // illumination down
         buf[3] = 0xC4      // illumination up
         buf[4] = UInt8(clamped)
-        try setFeature(buf)
+        // Linux: asus_kbd_set_brightness sends sizeof(buf) == 16.
+        return try setFeature(buf, exactLength: Self.protocolReportSize)
     }
 }

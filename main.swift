@@ -109,8 +109,8 @@ case "set":
     }
     do {
         try hid.initialize()
-        try hid.setBacklight(level: level)
-        print("backlight -> \(level)")
+        let used = try hid.setBacklight(level: level)
+        print("backlight -> \(level) (feature report sent as \(used) bytes)")
     } catch {
         FileHandle.standardError.write("error: \(error)\n".data(using: .utf8)!)
         exit(1)
