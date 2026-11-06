@@ -1,50 +1,97 @@
 //
 //  main.swift  (asus-kbd)
 //
-//  Command line front end for the native keyboard backlight control.
+//  Command line front end for native ASUS keyboard backlight control.
 //
-//    asus-kbd info            show device, capabilities and current level
-//    asus-kbd set <0-3>       set the backlight level
-//    asus-kbd up | down       step the level
-//    asus-kbd daemon          listen for Fn keys and drive the backlight
+//    asus-kbd list            enumerate every ASUS HID interface
+//    asus-kbd info [n]        device, capabilities, raw reply bytes
+//    asus-kbd set <0-3> [n]   set the backlight level
+//    asus-kbd up | down       step one level
+//    asus-kbd daemon [n]      listen for the Fn illumination keys
+//
+//  The optional [n] selects an interface index from `list`. Without it the
+//  ASUS vendor collection (usage page 0xFF31) is preferred.
 //
 
 import Foundation
 
 func usage() {
     print("""
-    usage: asus-kbd <command>
+    usage: asus-kbd <command> [index]
 
-      info            show device and capabilities
-      set <0-3>       set backlight level
+      list            enumerate ASUS HID interfaces (start here)
+      info [n]        show the chosen interface, capabilities and raw reply
+      set <0-3> [n]   set the backlight level
       up | down       step one level
-      daemon          listen for Fn illumination keys
+      daemon [n]      listen for the Fn illumination keys
     """)
+}
+
+func hex(_ bytes: [UInt8], _ n: Int) -> String {
+    bytes.prefix(n).map { String(format: "%02X", $0) }.joined(separator: " ")
 }
 
 let args = CommandLine.arguments
 guard args.count >= 2 else { usage(); exit(2) }
 
+// ---- commands that do not need an open device -------------------------
+
+if args[1] == "list" {
+    let list = AsusKbdHID.candidates()
+    if list.isEmpty {
+        print("no ASUS HID devices found (vendor 0x0B05)")
+        exit(1)
+    }
+    print("ASUS HID interfaces (\(list.count)):")
+    for c in list.sorted(by: { $0.index < $1.index }) {
+        print("  " + c.summary)
+    }
+    print("")
+    print("pick one with: asus-kbd info <index>")
+    exit(0)
+}
+
+// ---- resolve the optional interface index ----------------------------
+
+let command = args[1]
+var deviceIndex: Int? = nil
+switch command {
+case "info", "daemon", "up", "down":
+    if args.count >= 3, let n = Int(args[2]) { deviceIndex = n }
+case "set":
+    if args.count >= 4, let n = Int(args[3]) { deviceIndex = n }
+default:
+    break
+}
+
 let hid = AsusKbdHID()
 
 do {
-    try hid.open()
+    try hid.open(index: deviceIndex)
 } catch {
     FileHandle.standardError.write("error: \(error)\n".data(using: .utf8)!)
     exit(1)
 }
 defer { hid.close() }
 
-switch args[1] {
+if let c = hid.chosen {
+    print("using " + c.summary)
+    print("feature report buffer size: \(hid.featureSize) bytes")
+}
+
+switch command {
 case "info":
-    print("device: ASUS HID (VID 0x\(String(AsusKbdHID.vendorID, radix: 16)))")
     do {
         try hid.initialize()
+        print("init report sent")
         let funcs = try hid.functions()
+        let reply = try hid.getFeature()
+        print("raw reply (\(reply.length) bytes): \(hex(reply.bytes, min(reply.length, 32)))")
         let supported = funcs.contains(.keyboardBacklight)
+        print("capability byte: 0x\(String(funcs.rawValue, radix: 16))")
         print("backlight supported: \(supported ? "yes" : "no")")
         if !supported {
-            print("note: firmware did not report backlight support; writes will be ignored")
+            print("note: try another index from `asus-kbd list`")
         }
     } catch {
         FileHandle.standardError.write("error: \(error)\n".data(using: .utf8)!)
@@ -70,12 +117,8 @@ case "set":
     }
 
 case "up", "down":
-    // Stepping from the CLI needs a known starting point; the firmware can be
-    // read back through the feature report, but its value is model specific,
-    // so treat a bare up/down as "one step from the middle".
-    let delta = (args[1] == "up") ? 1 : -1
-    let start = 2
-    let level = max(0, min(start + delta, AsusKbdHID.maxLevel))
+    let delta = (command == "up") ? 1 : -1
+    let level = max(0, min(2 + delta, AsusKbdHID.maxLevel))
     do {
         try hid.initialize()
         try hid.setBacklight(level: level)
