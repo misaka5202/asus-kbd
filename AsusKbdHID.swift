@@ -217,16 +217,21 @@ final class AsusKbdHID {
             buffer.append(contentsOf: [UInt8](repeating: 0, count: featureSize - buffer.count))
         }
 
+        // Capture the length before taking the exclusive borrow: reading
+        // buffer.count inside withUnsafeMutableBytes is an overlapping access
+        // and Swift rejects it at compile time.
+        let length = buffer.count
+
         let kr: IOReturn = buffer.withUnsafeMutableBytes { raw -> IOReturn in
             let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
             return IOHIDDeviceSetReport(dev,
                                         kIOHIDReportTypeFeature,
                                         Self.featureReportID,
                                         base,
-                                        CFIndex(buffer.count))
+                                        CFIndex(length))
         }
         if kr != kIOReturnSuccess {
-            throw AsusKbdError.setReportFailed(kr, buffer.count)
+            throw AsusKbdError.setReportFailed(kr, length)
         }
         return buffer.count
     }
