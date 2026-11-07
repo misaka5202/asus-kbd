@@ -31,7 +31,7 @@ jobs:
             -framework IOKit \
             -framework CoreFoundation \
             -o asus-kbd \
-            AsusKbdHID.swift FnKeyMonitor.swift main.swift 2>&1 | tee build.log
+            AsusKbdHID.swift FnKeyMonitor.swift CoreBrightnessProbe.swift main.swift 2>&1 | tee build.log
 
       - name: Verify binary
         run: |
@@ -48,7 +48,7 @@ jobs:
           fi
           # The protocol constants must be in the binary, otherwise the
           # compiler folded something away.
-          for sym in AsusKbdHID FnKeyMonitor setBacklight illumination; do
+          for sym in AsusKbdHID FnKeyMonitor setBacklight illumination CoreBrightness KeyboardBacklightBrightness; do
             strings asus-kbd | grep -qi "$sym" \
               || { echo "MISSING: $sym"; exit 1; }
           done

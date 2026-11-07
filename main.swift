@@ -8,6 +8,7 @@
 //    asus-kbd set <0-3> [n]   set the backlight level
 //    asus-kbd up | down       step one level
 //    asus-kbd daemon [n]      listen for the Fn illumination keys
+//    asus-kbd cbprobe [level] ask macOS's CoreBrightness system what it knows
 //
 //  The optional [n] selects an interface index from `list`. Without it the
 //  ASUS vendor collection (usage page 0xFF31) is preferred.
@@ -24,6 +25,7 @@ func usage() {
       set <0-3> [n]   set the backlight level
       up | down       step one level
       daemon [n]      listen for the Fn illumination keys
+      cbprobe [0-1]   ask macOS's own backlight system what it knows
     """)
 }
 
@@ -35,6 +37,18 @@ let args = CommandLine.arguments
 guard args.count >= 2 else { usage(); exit(2) }
 
 // ---- commands that do not need an open device -------------------------
+
+if args[1] == "cbprobe" {
+    var wanted: Float? = nil
+    if args.count >= 3 {
+        guard let v = Float(args[2]), v >= 0, v <= 1 else {
+            FileHandle.standardError.write("error: cbprobe level must be 0.0-1.0\n".data(using: .utf8)!)
+            exit(2)
+        }
+        wanted = v
+    }
+    exit(CoreBrightnessProbe.run(setValue: wanted))
+}
 
 if args[1] == "list" {
     let list = AsusKbdHID.candidates()
