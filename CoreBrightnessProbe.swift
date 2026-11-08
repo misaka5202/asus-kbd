@@ -39,6 +39,8 @@ import Foundation
     func isAmbientFeatureAvailable(onKeyboard kid: UInt64) -> Bool
     @objc(isAutoBrightnessEnabledForKeyboard:)
     func isAutoBrightnessEnabled(forKeyboard kid: UInt64) -> Bool
+    @objc(enableAutoBrightness:forKeyboard:)
+    func enableAutoBrightness(_ enabled: Bool, forKeyboard kid: UInt64) -> Bool
     @objc(backlightLevelForKeyboard:)
     func backlightLevel(forKeyboard kid: UInt64) -> Float
 }
@@ -48,7 +50,13 @@ enum CoreBrightnessProbe {
     static let brightnessKey = "KeyboardBacklightBrightness"
 
     /// Returns a process exit status.
-    static func run(setValue: Float?) -> Int32 {
+    ///
+    /// autoBrightness: nil leaves it alone, false turns it off, true turns it on.
+    /// Turning the ambient-driven automatic brightness off is the test for the
+    /// long-standing "slider is greyed out" puzzle: with automatic keyboard
+    /// brightness enabled, macOS disables the manual slider, and this driver
+    /// publishes ambient light keys, so macOS believes this machine has an ALS.
+    static func run(setValue: Float?, autoBrightness: Bool? = nil) -> Int32 {
         let path = "/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness"
         guard dlopen(path, RTLD_NOW) != nil else {
             print("CoreBrightness: framework could not be loaded")
@@ -104,6 +112,15 @@ enum CoreBrightnessProbe {
                 print("  setProperty(\(wanted)) -> \(ok)")
                 print("    ^ if the keyboard light changed, this is a working control path;")
                 print("      if not, the write is accepted and dropped")
+            }
+
+            if let enable = autoBrightness {
+                let before = kbc.isAutoBrightnessEnabled(forKeyboard: kid)
+                let ok = kbc.enableAutoBrightness(enable, forKeyboard: kid)
+                let after = kbc.isAutoBrightnessEnabled(forKeyboard: kid)
+                print("  enableAutoBrightness(\(enable)) -> \(ok)   [\(before) -> \(after)]")
+                print("    ^ with automatic brightness off, macOS should let the")
+                print("      System Settings slider be dragged. Check the pane now.")
             }
             print("")
         }

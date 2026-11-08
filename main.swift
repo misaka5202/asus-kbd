@@ -8,7 +8,8 @@
 //    asus-kbd set <0-3> [n]   set the backlight level
 //    asus-kbd up | down       step one level
 //    asus-kbd daemon [n]      listen for the Fn illumination keys
-//    asus-kbd cbprobe [level] ask macOS's CoreBrightness system what it knows
+//      asus-kbd cbprobe [level] ask macOS's CoreBrightness system what it knows
+//      asus-kbd cbprobe auto-off  turn automatic keyboard brightness off
 //
 //  The optional [n] selects an interface index from `list`. Without it the
 //  ASUS vendor collection (usage page 0xFF31) is preferred.
@@ -26,6 +27,7 @@ func usage() {
       up | down       step one level
       daemon [n]      listen for the Fn illumination keys
       cbprobe [0-1]   ask macOS's own backlight system what it knows
+      cbprobe auto-off|auto-on   toggle automatic keyboard brightness
     """)
 }
 
@@ -39,15 +41,27 @@ guard args.count >= 2 else { usage(); exit(2) }
 // ---- commands that do not need an open device -------------------------
 
 if args[1] == "cbprobe" {
+    // cbprobe                        read the state
+    // cbprobe <0-1>                  also write that brightness
+    // cbprobe auto-off | auto-on     turn automatic keyboard brightness off/on
     var wanted: Float? = nil
+    var auto: Bool? = nil
+
     if args.count >= 3 {
-        guard let v = Float(args[2]), v >= 0, v <= 1 else {
-            FileHandle.standardError.write("error: cbprobe level must be 0.0-1.0\n".data(using: .utf8)!)
-            exit(2)
+        switch args[2] {
+        case "auto-off":
+            auto = false
+        case "auto-on":
+            auto = true
+        default:
+            guard let v = Float(args[2]), v >= 0, v <= 1 else {
+                FileHandle.standardError.write("error: cbprobe takes 0.0-1.0, auto-off or auto-on\n".data(using: .utf8)!)
+                exit(2)
+            }
+            wanted = v
         }
-        wanted = v
     }
-    exit(CoreBrightnessProbe.run(setValue: wanted))
+    exit(CoreBrightnessProbe.run(setValue: wanted, autoBrightness: auto))
 }
 
 if args[1] == "list" {
