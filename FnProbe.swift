@@ -58,36 +58,38 @@ let callback: IOHIDReportCallback = { _, _, sender, _, reportID, report, reportL
             .joined(separator: " "))
 }
 
-@main
-struct FnProbe {
-    static func main() {
-        print("=== ASUS Fn key code probe ===")
-        print("")
-        print("Prints only report 0x5A, which carries the Fn key codes.")
-        print("Press the Fn keys in a known order, one every two seconds.")
-        print("Ctrl-C to stop.")
-        print("")
+// Swift rejects @main in a module that also has top-level code, and the
+// callback needs file-scope state, so the entry point is a plain function
+// invoked from a small top-level statement at the end of the file.
+func runProbe() {
+    print("=== ASUS Fn key code probe ===")
+    print("")
+    print("Prints only report 0x5A, which carries the Fn key codes.")
+    print("Press the Fn keys in a known order, one every two seconds.")
+    print("Ctrl-C to stop.")
+    print("")
 
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, [kIOHIDVendorIDKey as String: asusVendorID] as CFDictionary)
+    let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    IOHIDManagerSetDeviceMatching(manager, [kIOHIDVendorIDKey as String: asusVendorID] as CFDictionary)
 
-        let kr = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard kr == kIOReturnSuccess else {
-            print("IOHIDManagerOpen failed: 0x" + String(format: "%X", kr))
-            exit(1)
-        }
-
-        IOHIDManagerRegisterInputReportCallback(manager, callback, nil)
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
-
-        if let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>, !set.isEmpty {
-            print("listening on \(set.count) ASUS device(s); waiting for report 0x5A")
-            print("")
-        } else {
-            print("no ASUS HID devices matched vendor 0x0B05")
-            exit(1)
-        }
-
-        CFRunLoopRun()
+    let kr = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+    guard kr == kIOReturnSuccess else {
+        print("IOHIDManagerOpen failed: 0x" + String(format: "%X", kr))
+        exit(1)
     }
+
+    IOHIDManagerRegisterInputReportCallback(manager, callback, nil)
+    IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+
+    if let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>, !set.isEmpty {
+        print("listening on \(set.count) ASUS device(s); waiting for report 0x5A")
+        print("")
+    } else {
+        print("no ASUS HID devices matched vendor 0x0B05")
+        exit(1)
+    }
+
+    CFRunLoopRun()
 }
+
+runProbe()
