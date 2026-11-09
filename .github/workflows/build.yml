@@ -43,6 +43,17 @@ jobs:
             -o hkscan \
             HKScan.swift AsusKbdHID.swift 2>&1 | tee hkscan-build.log
 
+          # fnprobe narrows hkscan down to the one thing that matters for Fn
+          # keys: report 0x5A, whose second byte is the key code. hkscan was
+          # too noisy to read because the same keyboard also emits a 0x5D
+          # heartbeat and a stream of 0x01 keyboard reports.
+          swiftc -O \
+            -target x86_64-apple-macos11.0 \
+            -framework IOKit \
+            -framework CoreFoundation \
+            -o fnprobe \
+            FnProbe.swift 2>&1 | tee fnprobe-build.log
+
       - name: Verify binary
         run: |
           set -euo pipefail
@@ -64,6 +75,7 @@ jobs:
           done
 
           test -f hkscan || { echo "hkscan not produced"; exit 1; }
+          test -f fnprobe || { echo "fnprobe not produced"; exit 1; }
           lipo -info hkscan | grep -q x86_64 \
             || { echo "hkscan is not x86_64"; exit 1; }
           echo "verification OK"
@@ -75,6 +87,7 @@ jobs:
           mkdir -p artifacts
           [ -f asus-kbd ] && cp asus-kbd artifacts/ || true
           [ -f hkscan ] && cp hkscan artifacts/ || true
+          [ -f fnprobe ] && cp fnprobe artifacts/ || true
           ls -l artifacts
 
       - name: Upload artifacts
@@ -93,4 +106,5 @@ jobs:
           path: |
             build.log
             hkscan-build.log
+            fnprobe-build.log
           if-no-files-found: ignore
