@@ -93,8 +93,9 @@ let inputCallback: IOHIDReportCallback = { context, result, sender, type, report
         deviceInfo[key] = info
     }
 
-    let bytes = report.bindMemory(to: UInt8.self, capacity: reportLength)
-    let payload = hex(bytes, reportLength)
+    // `report` already arrives as a pointer to UInt8, so it is passed straight
+    // through; bindMemory on it does not compile.
+    let payload = hex(report, reportLength)
 
     let elapsed = String(format: "%6.2f", Date().timeIntervalSince(startTime))
     let shape = String(format: "0x%02X %@", reportID, payload)
@@ -111,7 +112,9 @@ let inputCallback: IOHIDReportCallback = { context, result, sender, type, report
     print(line)
 }
 
-func main() {
+@main
+struct HKScan {
+    static func main() {
     print("=== ASUS HID input scanner ===")
     print("")
     print("Press each Fn key once, slowly, and note which line appears.")
@@ -155,4 +158,4 @@ func main() {
     CFRunLoopRun()
 }
 
-main()
+}
