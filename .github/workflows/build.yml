@@ -54,6 +54,15 @@ jobs:
             -o fnprobe \
             FnProbe.swift 2>&1 | tee fnprobe-build.log
 
+          # fnkeys turns the codes fnprobe reveals into actions. Same
+          # IOHIDManager approach, so it needs no signing and no kext.
+          swiftc -O \
+            -target x86_64-apple-macos11.0 \
+            -framework IOKit \
+            -framework CoreFoundation \
+            -o fnkeys \
+            fnkeys.swift 2>&1 | tee fnkeys-build.log
+
       - name: Verify binary
         run: |
           set -euo pipefail
@@ -76,6 +85,7 @@ jobs:
 
           test -f hkscan || { echo "hkscan not produced"; exit 1; }
           test -f fnprobe || { echo "fnprobe not produced"; exit 1; }
+          test -f fnkeys || { echo "fnkeys not produced"; exit 1; }
           lipo -info hkscan | grep -q x86_64 \
             || { echo "hkscan is not x86_64"; exit 1; }
           echo "verification OK"
@@ -88,6 +98,7 @@ jobs:
           [ -f asus-kbd ] && cp asus-kbd artifacts/ || true
           [ -f hkscan ] && cp hkscan artifacts/ || true
           [ -f fnprobe ] && cp fnprobe artifacts/ || true
+          [ -f fnkeys ] && cp fnkeys artifacts/ || true
           ls -l artifacts
 
       - name: Upload artifacts
@@ -107,4 +118,5 @@ jobs:
             build.log
             hkscan-build.log
             fnprobe-build.log
+            fnkeys-build.log
           if-no-files-found: ignore
