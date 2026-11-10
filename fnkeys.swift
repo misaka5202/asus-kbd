@@ -294,6 +294,25 @@ final class FnKeys {
 
         print("listening on \(set.count) ASUS device(s)")
 
+        // A second copy of this tool, or anything else that opened the same
+        // collection, is the usual cause of a later failure. Listing the
+        // interfaces makes that visible instead of guessing.
+        if CommandLine.arguments.contains("--list") {
+            for dev in set {
+                let pid = (IOHIDDeviceGetProperty(dev, kIOHIDProductIDKey as CFString)
+                           as? NSNumber)?.intValue ?? 0
+                let page = (IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsagePageKey as CFString)
+                            as? NSNumber)?.intValue ?? 0
+                let usage = (IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsageKey as CFString)
+                             as? NSNumber)?.intValue ?? 0
+                let feat = (IOHIDDeviceGetProperty(dev, kIOHIDMaxFeatureReportSizeKey as CFString)
+                            as? NSNumber)?.intValue ?? 0
+                print(String(format: "  PID 0x%04X  primary=%04X:%02X  maxFeature=%d",
+                             pid, page, usage, feat))
+            }
+            print("")
+        }
+
         // Pick the vendor-page collection for writes; that is the one that
         // carries the 0x5A feature report.
         var pick: IOHIDDevice?

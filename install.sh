@@ -63,9 +63,17 @@ echo "installed binary: $BIN"
 
 # --- launchd job -----------------------------------------------------------
 
-# KeepAlive with RunAtLoad means it starts now and restarts if it ever exits.
-# That matters because the tool owns no state: if it dies, the Fn keys go dead
-# silently, and a restart is cheaper than noticing.
+# KeepAlive as a dictionary rather than `true`: restart only after a failure.
+#
+# A plain KeepAlive=true restarts the job even when it exits cleanly, and it
+# restarts it in a tight loop when start-up fails. That is exactly what went
+# wrong on this machine: IOHIDManagerOpen returned kIOReturnExclusiveAccess,
+# launchd relaunched the process, and each relaunch raced the previous one for
+# the same HID collection - so every attempt after the first failed for a
+# reason caused by the restart itself.
+#
+# SuccessfulExit=false means "relaunch only if it died", which is what is
+# wanted: a crash is worth retrying, a deliberate exit is not.
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -83,12 +91,15 @@ cat > "$PLIST" <<PLIST_EOF
     <true/>
 
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
-    <!-- A key listener that restarts in a tight loop would spam the log and
-         burn CPU, so a crash has to stay down for ten seconds first. -->
+    <!-- Fifteen seconds between relaunches. Long enough that a failing
+         start-up cannot fight itself for the HID collection. -->
     <key>ThrottleInterval</key>
-    <integer>10</integer>
+    <integer>15</integer>
 
     <key>StandardOutPath</key>
     <string>$LOG</string>
