@@ -14,7 +14,7 @@
 //  IOHIDManager, which needs no code signing, no kext and no SIP change.
 //
 //  The ACPI path exists too (_Qxx -> IANE -> Notify) but macOS never drives
-//  it: repeated measurements showed notify = 0 while keys were pressed. So
+//  it - repeated measurements showed notify = 0 while keys were pressed. So
 //  this listens on HID and ignores ACPI entirely.
 //
 //  Codes observed on this machine (GA503QM, PID 0x19B6):
@@ -25,36 +25,41 @@
 //      0xEC  heartbeat, every ~3 s - ignored
 //      0xB3  unconfirmed                0xAE  unconfirmed
 //
+//  Ownership of the HID device
+//  ---------------------------
+//  An earlier version of this file opened one IOHIDManager for input and a
+//  second one for the backlight write. That fails on this machine:
+//
+//      IOHIDManagerOpen  -> 0xE00002E2  kIOReturnExclusiveAccess
+//      IOHIDDeviceSetReport -> 0xE00002CD  kIOReturnNotOpen
+//
+//  A manager matching the vendor usage page takes exclusive ownership of the
+//  collection, so a second manager - or the queued report write behind it -
+//  cannot get in. There is exactly one manager here, and the device used for
+//  writing comes out of that same manager:
+//
+//      IOHIDManagerCreate / SetDeviceMatching(vendorID) / Open
+//      IOHIDManagerCopyDevices  ->  pick the vendor-page device
+//      IOHIDDeviceOpen          ->  takes the write path for that device
+//
+//  which is how asus-kbd opens it, and that already works here.
+//
 //  Scope
 //  -----
-//  This tool does the two things a userspace process can do without extra
-//  permissions:
+//      keyboard backlight   HID feature report 5A BA C5 C4 <level>
+//      sleep                IOPMSleepSystem
 //
-//      keyboard backlight   written straight to the keyboard as the HID
-//                           feature report 5A BA C5 C4 <level>, the same
-//                           protocol asus-kbd already proves works
-//      sleep                IOPMSleepSystem, the normal sleep path
+//  Everything else is reported and not acted on, because a key that does
+//  nothing is a usable system and a key that does the wrong thing is not:
 //
-//  Everything else is reported and not acted on, on purpose:
-//
-//      touchpad toggle      needs the AsusSMC kext's kern event; there is no
-//                           userspace equivalent that macOS honours
-//      microphone mute      would need a synthetic Consumer event, which
-//                           requires an event tap and accessibility consent
-//      wireless             macOS owns the WiFi state; a synthetic toggle
-//                           would race the menu bar
-//
-//  A key that does nothing is a usable system. A key that does the wrong thing
-//  is not, so unmapped or unsupported codes are printed and left alone.
+//      touchpad toggle      needs AsusSMC's kern event
+//      microphone mute      needs an event tap and accessibility consent
+//      wireless             macOS owns the WiFi state
 //
 //  Build:
 //    swiftc -O -target x86_64-apple-macos11.0 \
 //      -framework IOKit -framework CoreFoundation \
 //      -o fnkeys fnkeys.swift
-//
-//  Run:
-//    ./fnkeys              foreground, Ctrl-C to stop
-//    ./fnkeys --verbose    print raw bytes of every report
 //
 
 import Foundation
@@ -65,13 +70,14 @@ import IOKit.pwr_mgt
 // MARK: - Constants
 
 private let asusVendorID = 0x0B05
+private let asusVendorUsagePage = 0xFF31
 private let fnReportID: UInt32 = 0x5A
 
-/// The EC accepts 0...3 on this board; asus-kbd writes the same range through
-/// the same feature report.
+/// The EC accepts 0...3 on this board; asus-kbd writes the same range.
 private let maxBacklightLevel = 3
 
-/// Backlight report: report id 0x5A, magic BA C5 C4, then the level.
+/// Backlight report layout: report id, then BA C5 C4, then the level.
+/// The length is 5 bytes, which is what asus-kbd sends for this report.
 private let backlightMagic: [UInt8] = [0xBA, 0xC5, 0xC4]
 
 // MARK: - Codes
@@ -97,7 +103,6 @@ enum FnCode: UInt8 {
         }
     }
 
-    /// Whether this tool acts on the code, as opposed to only reporting it.
     var handled: Bool {
         switch self {
         case .illuminationUp, .illuminationDown, .sleep: return true
@@ -106,88 +111,69 @@ enum FnCode: UInt8 {
     }
 }
 
-// MARK: - State
+// MARK: - Shared state
 
 private var verbose = false
 private var backlightLevel = 2
 private var lastHeartbeat: TimeInterval = 0
 
-// MARK: - Keyboard backlight
+/// The one device used for feature-report writes, taken from the manager that
+/// is also listening for input. Kept at file scope because the report callback
+/// is a C function and cannot capture.
+private var writeDevice: IOHIDDevice?
 
-/// Sets the keyboard backlight over the HID feature report.
+// MARK: - Backlight
+
+/// Sends the backlight feature report on the already-open device.
 ///
-/// Kept separate from the report listener because opening a device for writing
-/// is a different operation from receiving reports, and doing it lazily means
-/// a machine without the vendor collection still runs the rest of the tool.
-final class Backlight {
-    private var device: IOHIDDevice?
-
-    func open() -> Bool {
-        if device != nil { return true }
-
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let match: [String: Any] = [
-            kIOHIDVendorIDKey as String: asusVendorID,
-            kIOHIDPrimaryUsagePageKey as String: 0xFF31,
-        ]
-        IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
-        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
-
-        guard let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>,
-              let first = set.first else {
-            return false
-        }
-
-        let kr = IOHIDDeviceOpen(first, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard kr == kIOReturnSuccess else {
-            NSLog("fnkeys: IOHIDDeviceOpen failed 0x%X", kr)
-            return false
-        }
-        device = first
-        return true
+/// Retries a few times: the first write after start can come back
+/// kIOReturnNotReady while the keyboard is still enumerating, and a single
+/// lost press is worse than a short retry.
+@discardableResult
+func setBacklight(_ level: Int) -> Bool {
+    guard let dev = writeDevice else {
+        NSLog("fnkeys: no write device")
+        return false
     }
 
-    @discardableResult
-    func set(level: Int) -> Bool {
-        guard open(), let dev = device else { return false }
-        let clamped = max(0, min(level, maxBacklightLevel))
+    let clamped = max(0, min(level, maxBacklightLevel))
+    var report = [UInt8](repeating: 0, count: 5)
+    report[0] = UInt8(fnReportID)
+    report[1] = backlightMagic[0]
+    report[2] = backlightMagic[1]
+    report[3] = backlightMagic[2]
+    report[4] = UInt8(clamped)
 
-        var report = [UInt8](repeating: 0, count: 5)
-        report[0] = UInt8(fnReportID)
-        report[1] = backlightMagic[0]
-        report[2] = backlightMagic[1]
-        report[3] = backlightMagic[2]
-        report[4] = UInt8(clamped)
-
+    for attempt in 0..<3 {
         let kr = report.withUnsafeBufferPointer { buf in
             IOHIDDeviceSetReport(dev, kIOHIDReportTypeFeature,
                                  CFIndex(fnReportID),
                                  buf.baseAddress!, buf.count)
         }
-        guard kr == kIOReturnSuccess else {
+        if kr == kIOReturnSuccess {
+            backlightLevel = clamped
+            return true
+        }
+        if attempt == 2 {
             NSLog("fnkeys: SetReport failed 0x%X", kr)
             return false
         }
-        backlightLevel = clamped
-        return true
+        Thread.sleep(forTimeInterval: 0.02)
     }
+    return false
 }
-
-private let backlight = Backlight()
 
 // MARK: - Actions
 
-private func handle(_ code: UInt8) {
+func handle(_ code: UInt8) {
     guard let fn = FnCode(rawValue: code) else {
         print(String(format: "  code 0x%02X - unmapped, ignored", code))
         return
     }
 
     if fn == .heartbeat {
-        // The keyboard emits this every few seconds whether or not a key was
-        // pressed. Printing it at most every 30 s keeps it visibly separate
-        // from real keys without flooding the log.
+        // Emitted every few seconds whether or not a key was pressed. Printing
+        // at most every 30 s keeps it visibly separate from real keys.
         let now = Date().timeIntervalSince1970
         if verbose || now - lastHeartbeat > 30 {
             print("  heartbeat (ignored)")
@@ -203,7 +189,7 @@ private func handle(_ code: UInt8) {
         case .touchpadToggle:
             print("    needs AsusSMC's kern event; no userspace equivalent")
         case .micMute:
-            print("    needs an event tap and accessibility consent; not synthesised")
+            print("    needs an event tap and accessibility consent")
         case .wireless:
             print("    macOS owns the WiFi state; not synthesised")
         default:
@@ -214,16 +200,14 @@ private func handle(_ code: UInt8) {
 
     switch fn {
     case .illuminationUp:
-        let target = backlightLevel + 1
-        if backlight.set(level: target) {
+        if setBacklight(backlightLevel + 1) {
             print("    backlight \(backlightLevel)")
         } else {
             print("    backlight write failed")
         }
 
     case .illuminationDown:
-        let target = backlightLevel - 1
-        if backlight.set(level: target) {
+        if setBacklight(backlightLevel - 1) {
             print("    backlight \(backlightLevel)")
         } else {
             print("    backlight write failed")
@@ -238,7 +222,6 @@ private func handle(_ code: UInt8) {
         let kr = IOPMSleepSystem(port)
         IOObjectRelease(port)
         if kr != kIOReturnSuccess {
-            NSLog("fnkeys: IOPMSleepSystem failed 0x%X", kr)
             print(String(format: "    sleep failed 0x%X", kr))
         }
 
@@ -253,7 +236,7 @@ private let reportCallback: IOHIDReportCallback = { _, _, sender, _, reportID, r
     guard reportID == fnReportID, length >= 2 else { return }
     let code = report[1]
 
-    // 0x00 is the release report that follows every press. Acting on it would
+    // 0x00 is the release report that follows every press; acting on it would
     // double every action.
     guard code != 0x00 else { return }
 
@@ -271,6 +254,8 @@ private let reportCallback: IOHIDReportCallback = { _, _, sender, _, reportID, r
     handle(code)
 }
 
+// MARK: - Entry point
+
 final class FnKeys {
     static func run() {
         if CommandLine.arguments.contains("--verbose") { verbose = true }
@@ -281,6 +266,9 @@ final class FnKeys {
         print("Ctrl-C to stop.")
         print("")
 
+        // One manager for everything. Matching only on the vendor id keeps the
+        // standard keyboard interface out of it, which is what lets
+        // IOHIDManagerOpen succeed while the system's own driver keeps working.
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         IOHIDManagerSetDeviceMatching(manager,
                                       [kIOHIDVendorIDKey as String: asusVendorID] as CFDictionary)
@@ -288,6 +276,10 @@ final class FnKeys {
         let openKr = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         guard openKr == kIOReturnSuccess else {
             print(String(format: "IOHIDManagerOpen failed: 0x%X", openKr))
+            if openKr == kIOReturnExclusiveAccess {
+                print("  another process holds this collection.")
+                print("  stop any earlier fnkeys:  launchctl bootout gui/$(id -u)/local.fnkeys")
+            }
             exit(1)
         }
 
@@ -301,10 +293,36 @@ final class FnKeys {
         }
 
         print("listening on \(set.count) ASUS device(s)")
-        if backlight.open() {
-            print("backlight control available, level \(backlightLevel)")
-        } else {
-            print("backlight control unavailable - Fn+F2/F3 will do nothing")
+
+        // Pick the vendor-page collection for writes; that is the one that
+        // carries the 0x5A feature report.
+        var pick: IOHIDDevice?
+        for dev in set {
+            let page = (IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsagePageKey as CFString)
+                        as? NSNumber)?.intValue ?? 0
+            if page == asusVendorUsagePage {
+                pick = dev
+                break
+            }
+        }
+        if pick == nil {
+            pick = set.first
+        }
+
+        if let dev = pick {
+            let kr = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            if kr == kIOReturnSuccess {
+                writeDevice = dev
+                print("backlight control available")
+                // Reflect the starting level so the first press moves from
+                // where the keyboard actually is rather than from a guess.
+                setBacklight(backlightLevel)
+            } else {
+                print(String(format: "backlight unavailable: IOHIDDeviceOpen 0x%X", kr))
+                if kr == kIOReturnExclusiveAccess {
+                    print("  the writable interface is held by another process")
+                }
+            }
         }
         print("")
 
